@@ -15,19 +15,23 @@ struct UsageSession: Codable, Identifiable, Equatable {
     let messageCount: Int
     let userMessageCount: Int
 
-    /// Day string (yyyy-MM-dd) from firstMessageAt for grouping
+    /// Gregorian calendar-day key in the viewer's timezone.
     var dayKey: String {
-        String(firstMessageAt.prefix(10))
+        dayKey(in: .current)
     }
 
-    /// Hour string (yyyy-MM-ddTHH) from firstMessageAt for hourly grouping
+    func dayKey(in timeZone: TimeZone) -> String {
+        Formatters.localDayKey(firstMessageAt, timeZone: timeZone)
+    }
+
+    /// Hour string (yyyy-MM-ddTHH) from firstMessageAt for hourly grouping.
+    /// Hourly range keys deliberately stay in UTC to match the API buckets.
     var hourKey: String {
         String(firstMessageAt.prefix(13))
     }
 
-    /// Absolute Date parsed from `firstMessageAt`. Used by client-side
-    /// time-window filters (see `TimeRange.startCutoff` for `.today`).
+    /// Absolute instant parsed from `firstMessageAt`.
     var date: Date? {
-        ISO8601DateFormatter().date(from: firstMessageAt)
+        Formatters.dateFromISO8601(firstMessageAt)
     }
 }

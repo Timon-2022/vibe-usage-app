@@ -108,6 +108,7 @@ private struct StatCard: View {
                 .buttonStyle(.plain)
                 .help(help ?? label)
                 .accessibilityLabel(label)
+                .accessibilityValue(value)
             } else {
                 cardContent
             }

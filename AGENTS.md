@@ -109,6 +109,7 @@ VibeUsageApp → AppDelegate → MenuBarController (NSStatusItem + PopoverPanel)
 - `.custom` — user-selected local date bounds, sent as `from` / `to` query params.
 
 Today requests `from=localMidnight` while rolling 24h requests `days=1`. The today-cutoff is also applied client-side via `TimeRange.startCutoff` so all filtered views and the menu-bar display share the same local-midnight semantics. `BarChartView`'s hourly fill loop keys off `appState.timeRange == .today` to start at midnight (slot count grows from 1 → 24) instead of "23 hours ago" for the rolling-24h case. Every `/api/usage` request includes `tz=TimeZone.current.identifier`.
+Multi-day API buckets carry UTC instants for the viewer's local midnight. Daily bucket/session keys must convert those instants through the current timezone; taking the raw ISO prefix shifts UTC+ users back one day and leaves today's 7D bar empty.
 
 ### Loading & Filtering
 `AppState` distinguishes first load from refresh:

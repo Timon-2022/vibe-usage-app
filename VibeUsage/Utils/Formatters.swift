@@ -1,6 +1,9 @@
 import Foundation
 
 enum Formatters {
+    private static let iso8601WithFractionalSeconds = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    private static let iso8601 = Date.ISO8601FormatStyle()
+
     /// Format large numbers with compact notation: 1234 → "1,234", 45200 → "45.2K"
     static func formatNumber(_ n: Int) -> String {
         if n >= 1_000_000 {
@@ -139,6 +142,29 @@ enum Formatters {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.date(from: key)
+    }
+
+    /// Parse an absolute ISO-8601 timestamp emitted by the usage API.
+    static func dateFromISO8601(_ value: String) -> Date? {
+        (try? iso8601WithFractionalSeconds.parse(value))
+            ?? (try? iso8601.parse(value))
+    }
+
+    /// Build the Gregorian calendar-day key in the viewer's timezone.
+    static func localDayKey(_ value: String, timeZone: TimeZone = .current) -> String {
+        guard let date = dateFromISO8601(value) else {
+            return String(value.prefix(10))
+        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        guard let year = components.year,
+              let month = components.month,
+              let day = components.day
+        else {
+            return String(value.prefix(10))
+        }
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 
     /// Format the gap between now and a future date: "12m", "2h 14m", "4d 18h", "已重置"

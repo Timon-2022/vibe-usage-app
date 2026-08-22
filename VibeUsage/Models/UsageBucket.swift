@@ -26,14 +26,18 @@ struct UsageBucket: Codable, Identifiable, Equatable {
         inputTokens + outputTokens + reasoningOutputTokens + cachedInputTokens
     }
 
-    /// Date parsed from bucketStart ISO string
+    /// Absolute instant parsed from the API's ISO-8601 bucket timestamp.
     var date: Date? {
-        ISO8601DateFormatter().date(from: bucketStart)
+        Formatters.dateFromISO8601(bucketStart)
     }
 
-    /// Day string (yyyy-MM-dd) for grouping
+    /// Gregorian calendar-day key in the viewer's timezone.
     var dayKey: String {
-        String(bucketStart.prefix(10))
+        dayKey(in: .current)
+    }
+
+    func dayKey(in timeZone: TimeZone) -> String {
+        Formatters.localDayKey(bucketStart, timeZone: timeZone)
     }
 
     /// Hour string (yyyy-MM-ddTHH) for hourly grouping
