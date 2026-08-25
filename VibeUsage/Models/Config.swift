@@ -5,6 +5,7 @@ struct VibeUsageConfig: Codable {
     var apiKey: String?
     var apiUrl: String?
     var lastSync: String?
+    var codexExtraHome: String?
 }
 
 enum ConfigManager {
@@ -25,17 +26,45 @@ enum ConfigManager {
         }
     }
 
-    /// Save config to disk
+    /// Merge app-owned values into the shared CLI config without dropping
+    /// fields introduced by newer CLI versions (privacy controls, device id,
+    /// cached server settings, and future additions).
     static func save(_ config: VibeUsageConfig) {
         do {
             try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(config)
-            try data.write(to: configFile)
+            let existingData = try? Data(contentsOf: configFile)
+            let data = try mergedConfigData(config, existingData: existingData)
+            try data.write(to: configFile, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: configFile.path
+            )
         } catch {
             print("Failed to save config: \(error)")
         }
+    }
+
+    static func mergedConfigData(
+        _ config: VibeUsageConfig,
+        existingData: Data?
+    ) throws -> Data {
+        var merged: [String: Any] = [:]
+        if let existingData,
+           let object = try? JSONSerialization.jsonObject(with: existingData),
+           let existing = object as? [String: Any] {
+            merged = existing
+        }
+
+        let encoded = try JSONEncoder().encode(config)
+        let appValues = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] ?? [:]
+        for (key, value) in appValues {
+            merged[key] = value
+        }
+
+        return try JSONSerialization.data(
+            withJSONObject: merged,
+            options: [.prettyPrinted, .sortedKeys]
+        )
     }
 
     /// Check if config exists and has an API key

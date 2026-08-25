@@ -16,14 +16,14 @@ vibe-usage-app/                    # SwiftUI macOS menu bar app (SPM, Swift 6, m
 │   │   ├── AppState.swift         # @Observable central state (buckets, filters, timeRange, sync)
 │   │   ├── AppConfig.swift        # Version string, API URL, debug/release config
 │   │   ├── UsageBucket.swift      # Codable data model (source, model, project, hostname, tokens, cost)
-│   │   └── Config.swift           # Persistent config (apiKey, apiUrl) in ~/.vibe-usage/
+│   │   └── Config.swift           # Shared ~/.vibe-usage config; app-owned fields + unknown CLI-field-preserving writes
 │   ├── Views/
 │   │   ├── PopoverView.swift      # Main dashboard container (520px wide popover)
 │   │   ├── SummaryCardsView.swift # 5 stat cards (cost, total tokens, cached tokens, active duration, total duration)
 │   │   ├── BarChartView.swift     # Custom-drawn bar chart (hourly/daily trend)
 │   │   ├── DistributionChartsView.swift  # 4 donut pie charts (terminal, tool, model, project)
 │   │   ├── FilterTagsView.swift   # Filter pills for source/model/project/hostname
-│   │   └── SettingsView.swift     # Settings form (re-link via device flow, menu bar prefs, auto-start, updates)
+│   │   └── SettingsView.swift     # Settings form (re-link, extra Codex Home, menu bar prefs, auto-start, updates)
 │   ├── Services/
 │   │   ├── APIClient.swift        # HTTP client for /api/usage (Bearer auth with vbu_ key) + unauthenticated device-flow helpers (requestDeviceCode/pollDeviceCode)
 │   │   ├── SyncEngine.swift       # Orchestrates CLI sync (runs @vibe-cafe/vibe-usage via Node/Bun)
@@ -137,6 +137,7 @@ SwiftUI keeps delivering hover updates as the content slides under the cursor.
 3. `RuntimeDetector` finds Node.js or Bun on the system
 4. After sync completes, `fetchUsageData()` refreshes the dashboard
 5. Opening the popover calls `fetchUsageDataIfNeeded()` (60s debounce) — fetch only, no upload
+6. Settings can persist one `codexExtraHome` through the CLI; sync then scans it together with the default `$CODEX_HOME` / `~/.codex`. Config writes must preserve unknown CLI fields, especially local privacy controls and `deviceId`.
 
 ### Rate-Limit Refresh
 No background timer. `RateLimitCoordinator` is driven entirely by user-visible events:

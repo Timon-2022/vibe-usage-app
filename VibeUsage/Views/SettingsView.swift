@@ -12,6 +12,10 @@ struct SettingsView: View {
     @State private var relinkUserCode: String?
     @State private var relinkError: String?
     @State private var relinkTask: Task<Void, Never>?
+    @State private var codexExtraHome = ""
+    @State private var isSavingCodexHome = false
+    @State private var codexHomeMessage: String?
+    @State private var codexHomeError: String?
 
     var body: some View {
         Form {
@@ -86,6 +90,50 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("同步")
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("额外 Codex Home 路径", text: $codexExtraHome)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(isSavingCodexHome)
+
+                    HStack {
+                        Button("选择文件夹…") {
+                            chooseCodexHome()
+                        }
+                        .disabled(isSavingCodexHome)
+
+                        Spacer()
+
+                        if isSavingCodexHome {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+
+                        Button("保存并同步") {
+                            Task { await saveCodexHome() }
+                        }
+                        .disabled(isSavingCodexHome)
+                    }
+
+                    if let codexHomeMessage {
+                        Text(codexHomeMessage)
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                    if let codexHomeError {
+                        Text(codexHomeError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .lineLimit(3)
+                    }
+                }
+            } header: {
+                Text("Codex 数据目录")
+            } footer: {
+                Text("额外扫描一个 Codex Home；默认的 ~/.codex 仍会保留。留空并保存可移除额外目录。")
+                    .font(.caption)
             }
 
             // Subscription quota monitoring
@@ -203,17 +251,59 @@ struct SettingsView: View {
     // MARK: - Private
 
     private func loadSettings() {
-        if let config = ConfigManager.load(), let key = config.apiKey {
-            if key.count > 12 {
-                apiKeyDisplay = "\(key.prefix(8))...\(key.suffix(4))"
+        if let config = ConfigManager.load() {
+            codexExtraHome = config.codexExtraHome ?? ""
+            if let key = config.apiKey {
+                if key.count > 12 {
+                    apiKeyDisplay = "\(key.prefix(8))...\(key.suffix(4))"
+                } else {
+                    apiKeyDisplay = key
+                }
             } else {
-                apiKeyDisplay = key
+                apiKeyDisplay = "未配置"
             }
         } else {
+            codexExtraHome = ""
             apiKeyDisplay = "未配置"
         }
 
         autoStartEnabled = SMAppService.mainApp.status == .enabled
+    }
+
+    private func chooseCodexHome() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "选择"
+        panel.message = "请选择包含 sessions 或 archived_sessions 的 Codex Home"
+
+        let expanded = (codexExtraHome as NSString).expandingTildeInPath
+        if !expanded.isEmpty, FileManager.default.fileExists(atPath: expanded) {
+            panel.directoryURL = URL(fileURLWithPath: expanded)
+        }
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        codexExtraHome = url.path
+        codexHomeMessage = nil
+        codexHomeError = nil
+    }
+
+    private func saveCodexHome() async {
+        isSavingCodexHome = true
+        codexHomeMessage = nil
+        codexHomeError = nil
+        defer { isSavingCodexHome = false }
+
+        let value = codexExtraHome.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try await CLIBridge.configSet(key: "codexExtraHome", value: value)
+            codexExtraHome = value
+            codexHomeMessage = value.isEmpty ? "已移除额外目录" : "已保存，正在同步"
+            await appState.triggerSync()
+        } catch {
+            codexHomeError = error.localizedDescription
+        }
     }
 
     private func setAutoStart(_ enabled: Bool) {

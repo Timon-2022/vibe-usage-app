@@ -35,63 +35,68 @@ enum CLIBridge {
 
     @discardableResult
     private static func runCLI(args: [String], timeout: TimeInterval = 30) async throws -> String {
-        guard let runtime = RuntimeDetector.detect() else {
-            throw CLIError.noRuntime
-        }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: runtime.executablePath)
-
-            process.arguments = RuntimeDetector.arguments(runtimeName: runtime.name, command: args)
-
-            // Inherit environment with runtime dir in PATH
-            var env = ProcessInfo.processInfo.environment
-            let runtimeDir = (runtime.executablePath as NSString).deletingLastPathComponent
-            if let existingPath = env["PATH"] {
-                env["PATH"] = "\(runtimeDir):\(existingPath)"
-            } else {
-                env["PATH"] = runtimeDir
-            }
-            env.merge(AppConfig.cliIdentityEnvironment) { _, appValue in appValue }
-
-            // In dev mode, tell CLI to use config.dev.json
-            #if DEBUG
-            env["VIBE_USAGE_DEV"] = "1"
-            #endif
-            process.environment = env
-
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            let timeoutItem = DispatchWorkItem {
-                if process.isRunning {
-                    process.terminate()
+        try await withCheckedThrowingContinuation { continuation in
+            // `Process.waitUntilExit()` is blocking. Keep it off the MainActor
+            // so Settings remains responsive while npx/bun resolves the CLI.
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let runtime = RuntimeDetector.detect() else {
+                    continuation.resume(throwing: CLIError.noRuntime)
+                    return
                 }
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
 
-            do {
-                try process.run()
-                process.waitUntilExit()
-                timeoutItem.cancel()
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: runtime.executablePath)
+                process.arguments = RuntimeDetector.arguments(runtimeName: runtime.name, command: args)
 
-                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-                if process.terminationStatus == 0 {
-                    continuation.resume(returning: stdout)
+                // Inherit environment with runtime dir in PATH
+                var env = ProcessInfo.processInfo.environment
+                let runtimeDir = (runtime.executablePath as NSString).deletingLastPathComponent
+                if let existingPath = env["PATH"] {
+                    env["PATH"] = "\(runtimeDir):\(existingPath)"
                 } else {
-                    let msg = stderr.isEmpty ? "Exit code \(process.terminationStatus)" : stderr
-                    continuation.resume(throwing: CLIError.processFailure(msg))
+                    env["PATH"] = runtimeDir
                 }
-            } catch {
-                timeoutItem.cancel()
-                continuation.resume(throwing: CLIError.processFailure(error.localizedDescription))
+                env.merge(AppConfig.cliIdentityEnvironment) { _, appValue in appValue }
+
+                // In dev mode, tell CLI to use config.dev.json
+                #if DEBUG
+                env["VIBE_USAGE_DEV"] = "1"
+                #endif
+                process.environment = env
+
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
+
+                let timeoutItem = DispatchWorkItem {
+                    if process.isRunning {
+                        process.terminate()
+                    }
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
+
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    timeoutItem.cancel()
+
+                    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                    let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+                    let stderr = String(data: stderrData, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+                    if process.terminationStatus == 0 {
+                        continuation.resume(returning: stdout)
+                    } else {
+                        let msg = stderr.isEmpty ? "Exit code \(process.terminationStatus)" : stderr
+                        continuation.resume(throwing: CLIError.processFailure(msg))
+                    }
+                } catch {
+                    timeoutItem.cancel()
+                    continuation.resume(throwing: CLIError.processFailure(error.localizedDescription))
+                }
             }
         }
     }
