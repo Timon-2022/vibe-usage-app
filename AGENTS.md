@@ -70,6 +70,27 @@ swift build -c release                   # Release build
 ./scripts/generate-appcast.sh            # Generate appcast.xml from dist/VibeUsage.zip
 ```
 
+## Architecture Approval Gate
+
+Issues and PRs are proposals, not approval to change architecture or ship a
+release. Explicit maintainer approval is required before changing privacy or
+security semantics, defaults/onboarding, identity/dedup behavior, source of
+truth, cross-repository API/config contracts, or automatic update behavior.
+This remains true during a broad issue sweep.
+
+The Mac app is a consumer of the backend + CLI contract. It must not introduce
+an app-local setting that overrides backend-owned Usage policy, reinterpret
+shared `~/.vibe-usage/config.json` fields as a new control plane, or silently
+change CLI behavior through `@latest`. Before approval, present the current and
+proposed invariants, all affected repositories, existing-user migration,
+release ordering, and rollback. Signed/notarized release creation happens only
+after that design approval; passing tests and possessing release credentials
+are not approval.
+
+Reference incident: CLI v0.10.15 implemented issue #49 as local-first privacy
+policy and was fully reverted in v0.10.16. Treat any equivalent app/CLI/backend
+proposal as a cross-repository RFC.
+
 ## Architecture
 
 ### App Type
