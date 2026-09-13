@@ -157,7 +157,7 @@ final class AppState {
     var isConfigured: Bool = false
     var runtimeAvailable: Bool = true
 
-    // MARK: - Rate Limits (subscription quota for Claude + Codex)
+    // MARK: - Rate Limits (subscription quota for Codex + Claude + CommandCode)
     var codexRateLimitEnabled: Bool = true {
         didSet { UserDefaults.standard.set(codexRateLimitEnabled, forKey: "codexRateLimitEnabled") }
     }
@@ -178,6 +178,15 @@ final class AppState {
     var claudeRateLimitEnabled: Bool = true {
         didSet { UserDefaults.standard.set(claudeRateLimitEnabled, forKey: "claudeRateLimitEnabled") }
     }
+
+    /// Whether to show the CommandCode rolling subscription quota card. This
+    /// is enabled by default; missing credentials simply produce a quiet
+    /// `.noData` snapshot and never affect the other providers.
+    var commandCodeRateLimitEnabled: Bool = true {
+        didSet { UserDefaults.standard.set(commandCodeRateLimitEnabled, forKey: "commandCodeRateLimitEnabled") }
+    }
+
+    var isCommandCodeRateLimitRefreshing: Bool = false
 
     // MARK: - Menu Bar Display Prefs
     var showCostInMenuBar: Bool = true {
@@ -243,6 +252,7 @@ final class AppState {
         let legacyRateLimitEnabled = UserDefaults.standard.object(forKey: "rateLimitMonitoringEnabled") as? Bool
         self.codexRateLimitEnabled = UserDefaults.standard.object(forKey: "codexRateLimitEnabled") as? Bool ?? legacyRateLimitEnabled ?? true
         self.claudeRateLimitEnabled = Self.resolveClaudeRateLimitPreference()
+        self.commandCodeRateLimitEnabled = UserDefaults.standard.object(forKey: "commandCodeRateLimitEnabled") as? Bool ?? true
         self.claudeUsesDesktopBundledCLI = ClaudeUsageProbe.primarySourceKind() == .desktop
 
         // Hand back the `statusLine.command` edit the pre-probe releases made.
@@ -259,9 +269,10 @@ final class AppState {
             startScheduler()
         }
 
-        // Rate limits are independent of configuration — both Codex and Claude
-        // read local files (no auth). Start only for enabled providers.
-        if codexRateLimitEnabled || claudeRateLimitEnabled {
+        // Rate limits are independent of Vibe Usage configuration. CommandCode
+        // reads its own local API key and the other providers read their own
+        // local credentials. Start only for enabled providers.
+        if codexRateLimitEnabled || claudeRateLimitEnabled || commandCodeRateLimitEnabled {
             startRateLimitCoordinator()
         }
     }
@@ -401,6 +412,22 @@ final class AppState {
         }
     }
 
+    /// Toggle CommandCode quota monitoring. The probe is read-only and keeps
+    /// the API key in memory for the request only; disabling cancels any
+    /// in-flight request and removes the card snapshot.
+    func setCommandCodeRateLimitEnabled(_ enabled: Bool) async {
+        guard commandCodeRateLimitEnabled != enabled else { return }
+        commandCodeRateLimitEnabled = enabled
+
+        if enabled {
+            if rateLimitCoordinator == nil { startRateLimitCoordinator() }
+            await rateLimitCoordinator?.refreshCommandCode()
+        } else {
+            rateLimitCoordinator?.commandCodeMonitoringDidChange()
+            removeRateLimit(for: .commandCode)
+        }
+    }
+
     /// Refresh Codex rate limits unconditionally. Safe — no keychain prompts.
     /// Used by the manual "更新数据" / retry paths.
     func refreshCodexRateLimit() async {
@@ -419,6 +446,9 @@ final class AppState {
         case .claudeCode:
             guard claudeRateLimitEnabled else { return }
             await rateLimitCoordinator?.refreshClaude()
+        case .commandCode:
+            guard commandCodeRateLimitEnabled else { return }
+            await rateLimitCoordinator?.refreshCommandCode()
         }
     }
 
@@ -437,16 +467,21 @@ final class AppState {
         await rateLimitCoordinator?.refreshClaudeIfNeeded()
     }
 
-    /// Refresh both Codex and Claude (in parallel). Prompt-free: Codex hits the
-    /// zero-quota usage endpoint with the CLI's own token, Claude reads the
-    /// local cache then delegates the live read to Claude Code. Safe to call
-    /// from the global user-initiated refresh path.
+    /// Refresh CommandCode quota on popover-open (debounced). It has no local
+    /// quota cache, so the first enabled refresh goes straight to live data.
+    func refreshCommandCodeRateLimitIfNeeded() async {
+        guard commandCodeRateLimitEnabled else { return }
+        await rateLimitCoordinator?.refreshCommandCodeIfNeeded()
+    }
+
+    /// Refresh all enabled providers in parallel. Each provider reads its own
+    /// existing credentials and no provider's request is sent to Vibe Usage.
     func refreshAllRateLimits() async {
         await rateLimitCoordinator?.refreshAll()
     }
 
     /// The menu-bar panel opened or closed. Closing cancels in-flight refreshes
-    /// for both providers — nothing off-screen is worth a round trip.
+    /// for all providers — nothing off-screen is worth a round trip.
     func rateLimitPanelVisibilityChanged(visible: Bool) {
         isRateLimitPanelVisible = visible
         rateLimitCoordinator?.panelVisibilityChanged(visible: visible)

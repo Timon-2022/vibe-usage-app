@@ -1,23 +1,30 @@
 import SwiftUI
 import AppKit
 
-/// Side-by-side subscription quota cards for Codex (left) and Claude (right).
+/// Subscription quota cards for Codex, Claude, and CommandCode. The 520px
+/// popover keeps Codex + Claude in the first row; CommandCode spans both grid
+/// columns on the second row when all three are visible.
 struct RateLimitCardView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
         let codex = snapshot(for: .codex)
         let claude = snapshot(for: .claudeCode)
+        let commandCode = snapshot(for: .commandCode)
         let visibleProviders = Self.visibleProviders(
             codex: codex,
             claude: claude,
+            commandCode: commandCode,
             codexEnabled: appState.codexRateLimitEnabled,
             claudeEnabled: appState.claudeRateLimitEnabled,
+            commandCodeEnabled: appState.commandCodeRateLimitEnabled,
             codexRefreshing: appState.isCodexRateLimitRefreshing,
-            claudeRefreshing: appState.isClaudeRateLimitRefreshing
+            claudeRefreshing: appState.isClaudeRateLimitRefreshing,
+            commandCodeRefreshing: appState.isCommandCodeRateLimitRefreshing
         )
         let showCodex = visibleProviders.contains(.codex)
         let showClaude = visibleProviders.contains(.claudeCode)
+        let showCommandCode = visibleProviders.contains(.commandCode)
 
         if showCodex && showClaude {
             // Grid keeps both row cells the same height by default — needed
@@ -28,12 +35,36 @@ struct RateLimitCardView: View {
                     ProviderCard(snapshot: codex)
                     ProviderCard(snapshot: claude)
                 }
+                if showCommandCode {
+                    GridRow {
+                        ProviderCard(snapshot: commandCode)
+                            .gridCellColumns(2)
+                    }
+                }
             }
-        } else if showCodex {
-            ProviderCard(snapshot: codex)
-        } else if showClaude {
-            ProviderCard(snapshot: claude)
-        } else if appState.codexRateLimitEnabled || appState.claudeRateLimitEnabled {
+        } else if showCodex || showClaude {
+            Grid(alignment: .topLeading, horizontalSpacing: 8, verticalSpacing: 0) {
+                GridRow {
+                    if showCodex {
+                        ProviderCard(snapshot: codex)
+                            .gridCellColumns(2)
+                    } else {
+                        ProviderCard(snapshot: claude)
+                            .gridCellColumns(2)
+                    }
+                }
+                if showCommandCode {
+                    GridRow {
+                        ProviderCard(snapshot: commandCode)
+                            .gridCellColumns(2)
+                    }
+                }
+            }
+        } else if showCommandCode {
+            ProviderCard(snapshot: commandCode)
+        } else if appState.codexRateLimitEnabled
+                    || appState.claudeRateLimitEnabled
+                    || appState.commandCodeRateLimitEnabled {
             noticeBar
         } else {
             EmptyView()
@@ -59,13 +90,40 @@ struct RateLimitCardView: View {
         codexRefreshing: Bool,
         claudeRefreshing: Bool
     ) -> Set<ProviderRateLimit.Provider> {
+        visibleProviders(
+            codex: codex,
+            claude: claude,
+            commandCode: ProviderRateLimit(provider: .commandCode, status: .noData),
+            codexEnabled: codexEnabled,
+            claudeEnabled: claudeEnabled,
+            commandCodeEnabled: false,
+            codexRefreshing: codexRefreshing,
+            claudeRefreshing: claudeRefreshing,
+            commandCodeRefreshing: false
+        )
+    }
+
+    static func visibleProviders(
+        codex: ProviderRateLimit,
+        claude: ProviderRateLimit,
+        commandCode: ProviderRateLimit,
+        codexEnabled: Bool,
+        claudeEnabled: Bool,
+        commandCodeEnabled: Bool,
+        codexRefreshing: Bool,
+        claudeRefreshing: Bool,
+        commandCodeRefreshing: Bool
+    ) -> Set<ProviderRateLimit.Provider> {
         let codexHasContent = codexEnabled && (codex.status != .noData || codexRefreshing)
         let claudeHasContent = claudeEnabled && (claude.status != .noData || claudeRefreshing)
-        guard codexHasContent || claudeHasContent else { return [] }
+        let commandCodeHasContent = commandCodeEnabled
+            && (commandCode.status != .noData || commandCodeRefreshing)
+        guard codexHasContent || claudeHasContent || commandCodeHasContent else { return [] }
 
         var visible: Set<ProviderRateLimit.Provider> = []
         if codexEnabled { visible.insert(.codex) }
         if claudeEnabled { visible.insert(.claudeCode) }
+        if commandCodeEnabled { visible.insert(.commandCode) }
         return visible
     }
 
@@ -76,7 +134,7 @@ struct RateLimitCardView: View {
         HStack(spacing: 6) {
             Image(systemName: "info.circle")
                 .font(.system(size: 10))
-            Text("支持 Codex / Claude 订阅配额监控")
+            Text("支持 Codex / Claude / CommandCode 订阅配额监控")
                 .font(.system(size: 11))
         }
         .foregroundStyle(Color(white: 0.4))
@@ -253,6 +311,9 @@ private struct ProviderCard: View {
     /// payload. Free-tier and Claude payloads don't carry a 5h window, so
     /// reserving the slot would just confuse users on those plans.
     private var expectsFiveHourWindow: Bool {
+        if snapshot.provider == .commandCode {
+            return snapshot.status == .ok
+        }
         guard snapshot.provider == .codex,
               let plan = snapshot.planLabel?.lowercased() else { return false }
         return plan == "plus" || plan == "pro" || plan == "prolite" || plan == "business"
@@ -335,6 +396,7 @@ private struct ProviderCard: View {
         switch snapshot.provider {
         case .codex:      return appState.isCodexRateLimitRefreshing
         case .claudeCode: return appState.isClaudeRateLimitRefreshing
+        case .commandCode: return appState.isCommandCodeRateLimitRefreshing
         }
     }
 
@@ -593,7 +655,7 @@ private struct ProviderIcon: View {
                 .interpolation(.high)
                 .scaledToFit()
         } else {
-            Image(systemName: provider == .codex ? "terminal" : "sparkles")
+            Image(systemName: provider.fallbackSymbolName)
                 .font(.system(size: 12))
                 .foregroundStyle(Color(white: 0.6))
         }
@@ -607,6 +669,7 @@ private struct ProviderIcon: View {
         switch provider {
         case .codex:      resource = "codex-icon"
         case .claudeCode: resource = "claude-icon"
+        case .commandCode: return nil
         }
         let url = Bundle.appResources.url(forResource: resource, withExtension: "png")
             ?? Bundle.appResources.url(forResource: resource, withExtension: "svg")
@@ -656,6 +719,15 @@ private extension ProviderRateLimit.Provider {
         switch self {
         case .codex:      return "Codex"
         case .claudeCode: return "Claude"
+        case .commandCode: return "CommandCode"
+        }
+    }
+
+    var fallbackSymbolName: String {
+        switch self {
+        case .codex: return "terminal"
+        case .claudeCode: return "sparkles"
+        case .commandCode: return "command"
         }
     }
 }

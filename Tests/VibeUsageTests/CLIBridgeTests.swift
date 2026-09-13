@@ -1,8 +1,10 @@
-import XCTest
+import Foundation
+import Testing
 @testable import VibeUsage
 
-final class CLIBridgeTests: XCTestCase {
-    func testDecodeRootsPreservesToolSpecificLists() throws {
+struct CLIBridgeTests {
+    @Test
+    func decodeRootsPreservesToolSpecificLists() throws {
         let roots = try CLIBridge.decodeRoots("""
         {
           "codex": ["/runtime/a", "/runtime/b"],
@@ -11,17 +13,15 @@ final class CLIBridgeTests: XCTestCase {
         }
         """)
 
-        XCTAssertEqual(roots["codex"], ["/runtime/a", "/runtime/b"])
-        XCTAssertEqual(roots["grok"], ["/runtime/grok"])
-        XCTAssertEqual(roots["antigravity"], [])
+        #expect(roots["codex"] == ["/runtime/a", "/runtime/b"])
+        #expect(roots["grok"] == ["/runtime/grok"])
+        #expect(roots["antigravity"] == [])
     }
 
-    func testConfigCommandsAgainstLocalCLI() async throws {
-        guard ProcessInfo.processInfo.environment["VIBE_USAGE_CLI_PACKAGE"] != nil,
-              ProcessInfo.processInfo.environment["VIBE_USAGE_CONFIG_DIR"] != nil else {
-            throw XCTSkip("需要隔离配置目录和本地 CLI 路径")
-        }
-
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["VIBE_USAGE_CLI_PACKAGE"] != nil
+                  && ProcessInfo.processInfo.environment["VIBE_USAGE_CONFIG_DIR"] != nil,
+                  "需要隔离配置目录和本地 CLI 路径"))
+    func configCommandsAgainstLocalCLI() async throws {
         let base = FileManager.default.temporaryDirectory
             .appendingPathComponent("vibe-usage-cli-bridge-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: base) }
@@ -44,15 +44,15 @@ final class CLIBridgeTests: XCTestCase {
         }
 
         let roots = try await CLIBridge.configRoots()
-        XCTAssertEqual(roots["codex"], [base.appendingPathComponent("codex").path])
-        XCTAssertEqual(roots["grok"], [base.appendingPathComponent("grok").path])
-        XCTAssertEqual(roots["antigravity"], [base.appendingPathComponent("agy").path])
+        #expect(roots["codex"] == [base.appendingPathComponent("codex").path])
+        #expect(roots["grok"] == [base.appendingPathComponent("grok").path])
+        #expect(roots["antigravity"] == [base.appendingPathComponent("agy").path])
 
         try await CLIBridge.configRemoveRoot(
             source: "grok",
             path: base.appendingPathComponent("grok").path
         )
         let rootsAfterRemoval = try await CLIBridge.configRoots()
-        XCTAssertNil(rootsAfterRemoval["grok"])
+        #expect(rootsAfterRemoval["grok"] == nil)
     }
 }

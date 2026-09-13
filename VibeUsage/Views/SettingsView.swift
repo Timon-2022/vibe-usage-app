@@ -226,6 +226,14 @@ struct SettingsView: View {
                     }
                 }
                 .tint(.green)
+
+                Toggle("显示 CommandCode 订阅配额", isOn: Binding(
+                    get: { appState.commandCodeRateLimitEnabled },
+                    set: { newValue in
+                        Task { await appState.setCommandCodeRateLimitEnabled(newValue) }
+                    }
+                ))
+                .tint(.green)
             } header: {
                 Text("订阅配额")
             }
@@ -303,7 +311,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 460)
+        .frame(width: 420, height: 500)
         .onAppear {
             loadSettings()
             Task { await loadExtraRoots() }

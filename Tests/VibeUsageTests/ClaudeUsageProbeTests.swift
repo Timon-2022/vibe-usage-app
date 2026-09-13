@@ -300,4 +300,14 @@ private final class HomeOverridingFileManager: FileManager, @unchecked Sendable 
     }
 
     override var homeDirectoryForCurrentUser: URL { home }
+
+    /// Keep this fixture hermetic on developer machines that also have a
+    /// system-wide Claude CLI under /opt/homebrew or /usr/local.
+    override func isExecutableFile(atPath path: String) -> Bool {
+        guard URL(fileURLWithPath: path).standardizedFileURL.path
+            .hasPrefix(home.standardizedFileURL.path + "/") else {
+            return false
+        }
+        return super.isExecutableFile(atPath: path)
+    }
 }

@@ -2,8 +2,9 @@ import Foundation
 
 /// Refreshes rate-limit snapshots on demand and pushes results into AppState.
 ///
-/// Both providers follow the same shape: paint an on-disk snapshot instantly,
-/// then replace it with a live reading.
+/// Codex and Claude paint an on-disk snapshot instantly, then replace it with
+/// a live reading. CommandCode has no local quota cache, so it goes straight
+/// to its read-only live endpoint.
 ///
 /// Codex is network-first: `CodexUsageAPI` reads the zero-quota usage endpoint
 /// with the CLI's own OAuth token (a plain-file read — no prompts), falling
@@ -24,16 +25,20 @@ final class RateLimitCoordinator {
     private weak var appState: AppState?
     private var lastCodexFetchAt: Date?
     private var lastClaudeFetchAt: Date?
+    private var lastCommandCodeFetchAt: Date?
     private var isPanelVisible = false
     private var codexRefreshTask: Task<Void, Never>?
     private var codexRefreshID: UUID?
     private var claudeRefreshTask: Task<Void, Never>?
     private var claudeRefreshID: UUID?
+    private var commandCodeRefreshTask: Task<Void, Never>?
+    private var commandCodeRefreshID: UUID?
     private let fetchCodexLive: @MainActor () async throws -> ProviderRateLimit
     private let loadCodexCache: @MainActor () async -> ProviderRateLimit?
     private let readCodexFallback: @MainActor () async -> ProviderRateLimit
     private let fetchClaudeLive: @MainActor () async throws -> ProviderRateLimit
     private let loadClaudeCache: @MainActor () async -> ProviderRateLimit?
+    private let fetchCommandCodeLive: @MainActor () async throws -> ProviderRateLimit
 
     init(
         appState: AppState,
@@ -51,6 +56,9 @@ final class RateLimitCoordinator {
         },
         loadClaudeCache: @escaping @MainActor () async -> ProviderRateLimit? = {
             await RateLimitCoordinator.loadClaudeDiskSnapshot()
+        },
+        fetchCommandCodeLive: @escaping @MainActor () async throws -> ProviderRateLimit = {
+            try await CommandCodeUsageProbe.fetch()
         }
     ) {
         self.appState = appState
@@ -59,6 +67,7 @@ final class RateLimitCoordinator {
         self.readCodexFallback = readCodexFallback
         self.fetchClaudeLive = fetchClaudeLive
         self.loadClaudeCache = loadClaudeCache
+        self.fetchCommandCodeLive = fetchCommandCodeLive
     }
 
     /// Refresh Codex unconditionally: live endpoint first, JSONL fallback.
@@ -214,8 +223,14 @@ final class RateLimitCoordinator {
             if failure == .notApplicable {
                 // API key / Bedrock / Vertex session: this account has no plan
                 // quota at all, so there is nothing to show and nothing to retry.
+                // If a fresh Desktop/cache snapshot is already on screen,
+                // however, this process may simply be using a different auth
+                // context. Never erase a known-good card with a weaker
+                // `.noData` answer from the later live leg.
                 debugLog("[rate-limit] claude plan limits not applicable for this account")
-                upsert(ProviderRateLimit(provider: .claudeCode, status: .noData, fetchedAt: Date()))
+                if currentSnapshot(.claudeCode)?.status != .ok {
+                    upsert(ProviderRateLimit(provider: .claudeCode, status: .noData, fetchedAt: Date()))
+                }
             } else {
                 // No binary, offline, or the binary's own usage fetch failed.
                 // Keep whatever cache painted; with no cache, absence stays
@@ -242,21 +257,100 @@ final class RateLimitCoordinator {
         await refreshClaude()
     }
 
+    /// Refresh CommandCode unconditionally. There is no local quota cache to
+    /// paint first, so a cold card remains in its seeded loading state until
+    /// this live request settles.
+    func refreshCommandCode() async {
+        guard let appState, appState.commandCodeRateLimitEnabled else { return }
+        if let task = commandCodeRefreshTask {
+            await task.value
+            return
+        }
+
+        let refreshID = UUID()
+        appState.isCommandCodeRateLimitRefreshing = true
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performCommandCodeRefresh()
+        }
+        commandCodeRefreshID = refreshID
+        commandCodeRefreshTask = task
+        await task.value
+
+        if commandCodeRefreshID == refreshID {
+            commandCodeRefreshTask = nil
+            commandCodeRefreshID = nil
+            appState.isCommandCodeRateLimitRefreshing = false
+        }
+    }
+
+    private func performCommandCodeRefresh() async {
+        guard let appState, appState.commandCodeRateLimitEnabled else { return }
+
+        do {
+            let live = try await fetchCommandCodeLive()
+            guard !Task.isCancelled, appState.commandCodeRateLimitEnabled else { return }
+            upsert(live)
+        } catch is CancellationError {
+            return
+        } catch {
+            let failure = Self.classify(error)
+            guard !Task.isCancelled, appState.commandCodeRateLimitEnabled else { return }
+
+            // An already displayed live snapshot is more useful than replacing
+            // it with a transient error after the user manually refreshes.
+            // On a cold read, absent credentials/login stay quiet while network
+            // and schema failures expose a retry action.
+            if currentSnapshot(.commandCode)?.status != .ok {
+                let status: ProviderRateLimit.Status
+                switch failure {
+                case .absent, .notApplicable, .unauthorized:
+                    status = .noData
+                case .transient:
+                    status = .retryableError
+                }
+                upsert(ProviderRateLimit(
+                    provider: .commandCode,
+                    status: status,
+                    fetchedAt: Date()
+                ))
+            }
+        }
+        guard !Task.isCancelled else { return }
+        lastCommandCodeFetchAt = Date()
+    }
+
+    /// Refresh CommandCode only if the last read was over `maxAge` seconds ago.
+    /// This is used when the popover opens repeatedly.
+    func refreshCommandCodeIfNeeded(maxAge: TimeInterval = 60) async {
+        if let last = lastCommandCodeFetchAt, Date().timeIntervalSince(last) < maxAge {
+            return
+        }
+        await refreshCommandCode()
+    }
+
     /// Refresh everything currently visible, in parallel — the Codex leg now
     /// includes a network round-trip, so serializing would double the wait.
     func refreshAll() async {
         async let codex: Void = refreshCodex()
         async let claude: Void = refreshClaude()
-        _ = await (codex, claude)
+        async let commandCode: Void = refreshCommandCode()
+        _ = await (codex, claude, commandCode)
     }
 
     /// Ensure every enabled provider has a placeholder entry so the card row
     /// renders its loading state on a cold open instead of appearing empty.
     func seedPlaceholders() {
-        for provider in [ProviderRateLimit.Provider.codex, .claudeCode] {
-            let enabled = provider == .codex
-                ? appState?.codexRateLimitEnabled == true
-                : appState?.claudeRateLimitEnabled == true
+        for provider in [ProviderRateLimit.Provider.codex, .claudeCode, .commandCode] {
+            let enabled: Bool
+            switch provider {
+            case .codex:
+                enabled = appState?.codexRateLimitEnabled == true
+            case .claudeCode:
+                enabled = appState?.claudeRateLimitEnabled == true
+            case .commandCode:
+                enabled = appState?.commandCodeRateLimitEnabled == true
+            }
             guard enabled,
                   appState?.rateLimits.contains(where: { $0.provider == provider }) != true
             else { continue }
@@ -266,17 +360,18 @@ final class RateLimitCoordinator {
 
     // MARK: - Panel lifecycle
 
-    /// Off-screen refreshes have no one to display them, and both providers now
-    /// cost a real round trip (Codex over HTTP, Claude over a subprocess), so
-    /// closing the panel cancels whatever is in flight.
+    /// Off-screen refreshes have no one to display them, and all live legs cost
+    /// a real round trip (Codex/CommandCode over HTTP, Claude over a
+    /// subprocess), so closing the panel cancels whatever is in flight.
     ///
     /// There is no live file watcher any more: the statusline capture that used
-    /// to justify one is gone, and both providers refresh on open instead.
+    /// to justify one is gone, and providers refresh on open instead.
     func panelVisibilityChanged(visible: Bool) {
         isPanelVisible = visible
         if !visible {
             cancelCodexRefresh()
             cancelClaudeRefresh()
+            cancelCommandCodeRefresh()
         }
     }
 
@@ -285,6 +380,13 @@ final class RateLimitCoordinator {
     func claudeMonitoringDidChange() {
         if appState?.claudeRateLimitEnabled != true {
             cancelClaudeRefresh()
+        }
+    }
+
+    /// Stop an in-flight CommandCode request when its card is hidden.
+    func commandCodeMonitoringDidChange() {
+        if appState?.commandCodeRateLimitEnabled != true {
+            cancelCommandCodeRefresh()
         }
     }
 
@@ -304,6 +406,13 @@ final class RateLimitCoordinator {
         claudeRefreshTask = nil
         claudeRefreshID = nil
         appState?.isClaudeRateLimitRefreshing = false
+    }
+
+    func cancelCommandCodeRefresh() {
+        commandCodeRefreshTask?.cancel()
+        commandCodeRefreshTask = nil
+        commandCodeRefreshID = nil
+        appState?.isCommandCodeRateLimitRefreshing = false
     }
 
     private nonisolated static func readCodexSessionFiles() async -> ProviderRateLimit {

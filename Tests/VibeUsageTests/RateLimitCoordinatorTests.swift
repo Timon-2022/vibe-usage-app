@@ -286,26 +286,139 @@ struct RateLimitCoordinatorTests {
         )
     }
 
-    /// An API-key / Bedrock session has no plan quota at all. That is a
-    /// permanent answer, so the card collapses rather than showing stale
-    /// percentages or implying a retry would help.
+    /// A cached subscription snapshot must survive a later `.notApplicable`
+    /// probe result. Claude Desktop can have a fresh plan-usage cache while
+    /// the Claude Code process reports `rate_limits_available: false` (for
+    /// example when its auth context is different). The live result must not
+    /// erase the data already painted from disk.
     @Test @MainActor
-    func claudeAccountWithoutPlanLimitsCollapsesTheCard() async {
+    func claudeNotApplicableAfterFreshCacheKeepsCachedSnapshot() async {
         let appState = AppState()
         appState.claudeRateLimitEnabled = true
+        let cached = self.claudeSnapshot(
+            utilization: 10,
+            dataAsOf: Date(timeIntervalSince1970: 100)
+        )
         let coordinator = RateLimitCoordinator(
             appState: appState,
             fetchClaudeLive: { throw ClaudeUsageProbe.ProbeError.limitsNotApplicable },
-            loadClaudeCache: {
-                self.claudeSnapshot(
-                    utilization: 10,
-                    dataAsOf: Date(timeIntervalSince1970: 100)
-                )
-            }
+            loadClaudeCache: { cached }
         )
 
         await coordinator.refreshClaude()
 
-        #expect(appState.rateLimits.first { $0.provider == .claudeCode }?.status == .noData)
+        #expect(appState.rateLimits.first { $0.provider == .claudeCode } == cached)
+    }
+
+    private func commandCodeSnapshot(
+        utilization: Double,
+        dataAsOf: Date?
+    ) -> ProviderRateLimit {
+        ProviderRateLimit(
+            provider: .commandCode,
+            fiveHour: RateLimitWindow(
+                utilization: utilization,
+                resetsAt: Date(timeIntervalSince1970: 500),
+                windowDuration: 5 * 60 * 60
+            ),
+            sevenDay: RateLimitWindow(
+                utilization: utilization,
+                resetsAt: Date(timeIntervalSince1970: 500),
+                windowDuration: 7 * 24 * 60 * 60
+            ),
+            planLabel: "GOAT",
+            status: .ok,
+            fetchedAt: dataAsOf,
+            dataAsOf: dataAsOf
+        )
+    }
+
+    @Test @MainActor
+    func concurrentCommandCodeRefreshesShareOneLiveRequest() async {
+        let appState = AppState()
+        appState.commandCodeRateLimitEnabled = true
+        var fetchCount = 0
+        let live = commandCodeSnapshot(
+            utilization: 42,
+            dataAsOf: Date(timeIntervalSince1970: 200)
+        )
+        let coordinator = RateLimitCoordinator(
+            appState: appState,
+            fetchCommandCodeLive: {
+                fetchCount += 1
+                try await Task.sleep(for: .milliseconds(50))
+                return live
+            }
+        )
+
+        let first = Task { @MainActor in await coordinator.refreshCommandCode() }
+        let second = Task { @MainActor in await coordinator.refreshCommandCode() }
+        await first.value
+        await second.value
+
+        #expect(fetchCount == 1)
+        #expect(appState.rateLimits.first { $0.provider == .commandCode } == live)
+        #expect(!appState.isCommandCodeRateLimitRefreshing)
+    }
+
+    @Test @MainActor
+    func commandCodeMissingCredentialsStaysQuietWithoutCache() async {
+        let appState = AppState()
+        appState.commandCodeRateLimitEnabled = true
+        let coordinator = RateLimitCoordinator(
+            appState: appState,
+            fetchCommandCodeLive: { throw CommandCodeUsageProbe.FetchError.noCredentials }
+        )
+
+        await coordinator.refreshCommandCode()
+
+        #expect(
+            appState.rateLimits.first(where: { $0.provider == .commandCode })?.status == .noData
+        )
+    }
+
+    @Test @MainActor
+    func commandCodeNetworkFailureWithoutCacheSurfacesRetryableError() async {
+        let appState = AppState()
+        appState.commandCodeRateLimitEnabled = true
+        let coordinator = RateLimitCoordinator(
+            appState: appState,
+            fetchCommandCodeLive: { throw CommandCodeUsageProbe.FetchError.transport }
+        )
+
+        await coordinator.refreshCommandCode()
+
+        #expect(
+            appState.rateLimits.first(where: { $0.provider == .commandCode })?.status
+                == .retryableError
+        )
+    }
+
+    @Test @MainActor
+    func closingPanelCancelsCommandCodeRefreshWithoutPublishingLateData() async {
+        let appState = AppState()
+        appState.commandCodeRateLimitEnabled = true
+        var requestStarted = false
+        let coordinator = RateLimitCoordinator(
+            appState: appState,
+            fetchCommandCodeLive: {
+                requestStarted = true
+                try await Task.sleep(for: .seconds(30))
+                return self.commandCodeSnapshot(
+                    utilization: 99,
+                    dataAsOf: Date(timeIntervalSince1970: 300)
+                )
+            }
+        )
+
+        let refresh = Task { @MainActor in await coordinator.refreshCommandCode() }
+        while !requestStarted { await Task.yield() }
+        #expect(appState.isCommandCodeRateLimitRefreshing)
+
+        coordinator.panelVisibilityChanged(visible: false)
+        await refresh.value
+
+        #expect(!appState.isCommandCodeRateLimitRefreshing)
+        #expect(appState.rateLimits.first(where: { $0.provider == .commandCode }) == nil)
     }
 }
