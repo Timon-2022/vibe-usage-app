@@ -37,6 +37,7 @@ struct ProviderRateLimit: Equatable, Identifiable {
     enum Provider: String {
         case codex = "Codex"
         case claudeCode = "Claude Code"
+        case commandCode = "CommandCode"
     }
 
     enum Status: Equatable {

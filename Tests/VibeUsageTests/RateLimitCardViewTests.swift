@@ -85,4 +85,55 @@ struct RateLimitCardViewTests {
 
         #expect(visible == [.codex])
     }
+
+    @Test
+    func commandCodeIsVisibleAndOwnsSecondFullWidthRowWhenAvailable() {
+        let visible = RateLimitCardView.visibleProviders(
+            codex: snapshot(provider: .codex, status: .ok),
+            claude: snapshot(provider: .claudeCode, status: .ok),
+            commandCode: ProviderRateLimit(provider: .commandCode, status: .ok),
+            codexEnabled: true,
+            claudeEnabled: true,
+            commandCodeEnabled: true,
+            codexRefreshing: false,
+            claudeRefreshing: false,
+            commandCodeRefreshing: false
+        )
+
+        #expect(visible == [.codex, .claudeCode, .commandCode])
+    }
+
+    @Test
+    func onlyCommandCodeProviderIsFullWidthCandidate() {
+        let visible = RateLimitCardView.visibleProviders(
+            codex: snapshot(provider: .codex, status: .noData),
+            claude: snapshot(provider: .claudeCode, status: .noData),
+            commandCode: ProviderRateLimit(provider: .commandCode, status: .ok),
+            codexEnabled: false,
+            claudeEnabled: false,
+            commandCodeEnabled: true,
+            codexRefreshing: false,
+            claudeRefreshing: false,
+            commandCodeRefreshing: false
+        )
+
+        #expect(visible == [.commandCode])
+    }
+
+    @Test
+    func commandCodeRefreshingKeepsItsEnabledCardVisible() {
+        let visible = RateLimitCardView.visibleProviders(
+            codex: snapshot(provider: .codex, status: .noData),
+            claude: snapshot(provider: .claudeCode, status: .noData),
+            commandCode: ProviderRateLimit(provider: .commandCode, status: .noData),
+            codexEnabled: false,
+            claudeEnabled: false,
+            commandCodeEnabled: true,
+            codexRefreshing: false,
+            claudeRefreshing: false,
+            commandCodeRefreshing: true
+        )
+
+        #expect(visible == [.commandCode])
+    }
 }
