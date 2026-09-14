@@ -193,6 +193,165 @@ struct CommandCodeUsageProbeTests {
     }
 
     @Test
+    func suspiciousZeroWindowsUseUsageSummaryCostsAndKeepOriginalWindowMetadata() async throws {
+        let credits = try json("""
+        {
+          "windowLimits": {
+            "limited": true,
+            "fiveHour": { "used": 0, "cap": 14, "resetAt": 0 },
+            "weekly": { "used": 0, "cap": 35, "resetAt": 0 }
+          }
+        }
+        """)
+        let subscriptions = try json("""
+        { "success": true, "data": { "planId": "individual-goat" } }
+        """)
+        let fiveHourSummary = try json("""
+        { "success": true, "data": { "totalCost": 0.7248 } }
+        """)
+        let weeklySummary = try json("""
+        { "success": true, "data": { "totalCost": 17.034 } }
+        """)
+        let recorder = RequestRecorder()
+
+        let snapshot = try await CommandCodeUsageProbe.fetch(
+            now: now,
+            environment: ["COMMAND_CODE_API_KEY": "test-placeholder"],
+            baseURL: URL(string: "https://example.test")!,
+            requester: { request in
+                await recorder.record(request)
+                switch request.url?.path {
+                case "/alpha/billing/credits":
+                    return CommandCodeUsageProbe.HTTPResponse(data: credits, statusCode: 200)
+                case "/alpha/billing/subscriptions":
+                    return CommandCodeUsageProbe.HTTPResponse(data: subscriptions, statusCode: 200)
+                case "/alpha/usage/summary":
+                    let queryItems = URLComponents(
+                        url: try #require(request.url),
+                        resolvingAgainstBaseURL: false
+                    )?.queryItems ?? []
+                    let since = queryItems.first(where: { $0.name == "since" })?.value
+                    if since == "2023-11-14T17:13:20.000Z" {
+                        return CommandCodeUsageProbe.HTTPResponse(data: fiveHourSummary, statusCode: 200)
+                    }
+                    if since == "2023-11-07T22:13:20.000Z" {
+                        return CommandCodeUsageProbe.HTTPResponse(data: weeklySummary, statusCode: 200)
+                    }
+                    Issue.record("unexpected summary since value: \(since ?? "nil")")
+                    return CommandCodeUsageProbe.HTTPResponse(data: Data(), statusCode: 400)
+                default:
+                    Issue.record("unexpected request path: \(request.url?.path ?? "nil")")
+                    return CommandCodeUsageProbe.HTTPResponse(data: Data(), statusCode: 404)
+                }
+            }
+        )
+
+        let requests = await recorder.requests
+        #expect(snapshot.provider == .commandCode)
+        #expect(snapshot.planLabel == "GOAT")
+        #expect(snapshot.fiveHour?.utilization == 0.7248 / 14.0 * 100.0)
+        #expect(snapshot.sevenDay?.utilization == 17.034 / 35.0 * 100.0)
+        #expect(snapshot.fiveHour?.resetsAt == nil)
+        #expect(snapshot.fiveHour?.windowDuration == nil)
+        #expect(snapshot.sevenDay?.resetsAt == nil)
+        #expect(snapshot.sevenDay?.windowDuration == nil)
+        #expect(requests.map { $0.url?.path } == [
+            "/alpha/billing/credits",
+            "/alpha/billing/subscriptions",
+            "/alpha/usage/summary",
+            "/alpha/usage/summary"
+        ])
+        #expect(requests.dropFirst(2).allSatisfy {
+            $0.httpMethod == "GET"
+                && $0.value(forHTTPHeaderField: "Authorization") == "Bearer test-placeholder"
+                && $0.timeoutInterval == 10
+        })
+    }
+
+    @Test
+    func summaryFailureOrMalformedResponseKeepsOriginalZeroCredits() async throws {
+        let credits = try json("""
+        {
+          "windowLimits": {
+            "limited": true,
+            "fiveHour": { "used": 0, "cap": 14, "resetAt": 0 },
+            "weekly": { "used": 0, "cap": 35, "resetAt": 0 }
+          }
+        }
+        """)
+        let subscriptions = try json("""
+        { "success": true, "data": { "planId": "individual-goat" } }
+        """)
+        let recorder = RequestRecorder()
+
+        let snapshot = try await CommandCodeUsageProbe.fetch(
+            now: now,
+            environment: ["COMMAND_CODE_API_KEY": "test-placeholder"],
+            baseURL: URL(string: "https://example.test")!,
+            requester: { request in
+                await recorder.record(request)
+                switch request.url?.path {
+                case "/alpha/billing/credits":
+                    return CommandCodeUsageProbe.HTTPResponse(data: credits, statusCode: 200)
+                case "/alpha/billing/subscriptions":
+                    return CommandCodeUsageProbe.HTTPResponse(data: subscriptions, statusCode: 200)
+                case "/alpha/usage/summary":
+                    if await recorder.requests.count == 3 {
+                        return CommandCodeUsageProbe.HTTPResponse(data: Data(), statusCode: 503)
+                    }
+                    return CommandCodeUsageProbe.HTTPResponse(data: Data("not-json".utf8), statusCode: 200)
+                default:
+                    return CommandCodeUsageProbe.HTTPResponse(data: Data(), statusCode: 404)
+                }
+            }
+        )
+
+        let requests = await recorder.requests
+        #expect(snapshot.status == .ok)
+        #expect(snapshot.fiveHour?.utilization == 0)
+        #expect(snapshot.sevenDay?.utilization == 0)
+        #expect(snapshot.fiveHour?.resetsAt == nil)
+        #expect(snapshot.sevenDay?.resetsAt == nil)
+        #expect(requests.filter { $0.url?.path == "/alpha/usage/summary" }.count == 2)
+    }
+
+    @Test
+    func nonZeroCreditsAreNotOverriddenEvenWhenResetIsUnavailable() async throws {
+        let credits = try json("""
+        {
+          "windowLimits": {
+            "limited": true,
+            "fiveHour": { "used": 4, "cap": 14, "resetAt": 0 },
+            "weekly": { "used": 17, "cap": 35, "resetAt": 0 }
+          }
+        }
+        """)
+        let subscriptions = try json("""
+        { "success": true, "data": { "planId": "individual-goat" } }
+        """)
+        let recorder = RequestRecorder()
+
+        let snapshot = try await CommandCodeUsageProbe.fetch(
+            now: now,
+            environment: ["COMMAND_CODE_API_KEY": "test-placeholder"],
+            baseURL: URL(string: "https://example.test")!,
+            requester: { request in
+                await recorder.record(request)
+                if request.url?.path == "/alpha/billing/credits" {
+                    return CommandCodeUsageProbe.HTTPResponse(data: credits, statusCode: 200)
+                }
+                return CommandCodeUsageProbe.HTTPResponse(data: subscriptions, statusCode: 200)
+            }
+        )
+
+        let requests = await recorder.requests
+        #expect(snapshot.fiveHour?.utilization == 4.0 / 14.0 * 100.0)
+        #expect(snapshot.sevenDay?.utilization == 17.0 / 35.0 * 100.0)
+        #expect(requests.count == 2)
+        #expect(!requests.contains { $0.url?.path == "/alpha/usage/summary" })
+    }
+
+    @Test
     func missingCredentialsAreClassifiedAsAbsent() async {
         do {
             _ = try await CommandCodeUsageProbe.fetch(

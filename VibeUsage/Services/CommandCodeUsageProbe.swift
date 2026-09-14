@@ -5,7 +5,7 @@ import Foundation
 /// `/usage` command, while the billing endpoints provide a small, read-only
 /// JSON surface that is suitable for a menu-bar refresh.
 ///
-/// The API key is used only for the two in-memory requests. It is never logged,
+/// The API key is used only for these in-memory requests. It is never logged,
 /// written to Vibe Usage configuration, or sent to the Vibe Usage backend.
 enum CommandCodeUsageProbe {
     static let apiBaseURL = URL(string: "https://api.commandcode.ai")!
@@ -35,6 +35,17 @@ enum CommandCodeUsageProbe {
 
     private struct SubscriptionInfo {
         var planID: String?
+    }
+
+    private enum SummaryFallbackWindowKind {
+        case fiveHour
+        case weekly
+    }
+
+    private struct SummaryFallbackWindow {
+        let kind: SummaryFallbackWindowKind
+        let cap: Double
+        let duration: TimeInterval
     }
 
     private static let fiveHourDuration: TimeInterval = 5 * 60 * 60
@@ -88,6 +99,14 @@ enum CommandCodeUsageProbe {
         ) else {
             throw FetchError.unparseable
         }
+        snapshot = try await applyUsageSummaryFallback(
+            to: snapshot,
+            creditsData: credits.data,
+            now: now,
+            apiKey: apiKey,
+            baseURL: baseURL,
+            requester: requester
+        )
         if let subscriptionData,
            let subscription = parseSubscriptionResponse(subscriptionData) {
             snapshot.planLabel = formatPlanLabel(subscription.planID)
@@ -235,6 +254,7 @@ enum CommandCodeUsageProbe {
 
     private static func get(
         path: String,
+        queryItems: [URLQueryItem] = [],
         apiKey: String,
         baseURL: URL,
         requester: Requester
@@ -242,6 +262,16 @@ enum CommandCodeUsageProbe {
         var url = baseURL
         for component in path.split(separator: "/") {
             url.appendPathComponent(String(component))
+        }
+        if !queryItems.isEmpty {
+            guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+                throw FetchError.transport
+            }
+            components.queryItems = queryItems
+            guard let queryURL = components.url else {
+                throw FetchError.transport
+            }
+            url = queryURL
         }
 
         var request = URLRequest(url: url)
@@ -267,6 +297,123 @@ enum CommandCodeUsageProbe {
             throw FetchError.badResponse(response.statusCode)
         }
         return response
+    }
+
+    /// CommandCode's credits response can report a zero usage value together
+    /// with no reset timestamp even while the usage summary has real spend.
+    /// Query the summary only for those suspicious windows and keep the
+    /// credits response untouched when the best-effort request is unavailable.
+    private static func applyUsageSummaryFallback(
+        to snapshot: ProviderRateLimit,
+        creditsData: Data,
+        now: Date,
+        apiKey: String,
+        baseURL: URL,
+        requester: Requester
+    ) async throws -> ProviderRateLimit {
+        var snapshot = snapshot
+        let candidates = suspiciousSummaryWindows(in: creditsData)
+
+        for candidate in candidates {
+            try Task.checkCancellation()
+            let since = now.addingTimeInterval(-candidate.duration)
+            let response: HTTPResponse
+            do {
+                response = try await get(
+                    path: "/alpha/usage/summary",
+                    queryItems: [URLQueryItem(name: "since", value: iso8601String(since))],
+                    apiKey: apiKey,
+                    baseURL: baseURL,
+                    requester: requester
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Summary is a repair path only. The credits response remains
+                // authoritative whenever this optional request fails.
+                continue
+            }
+
+            guard let totalCost = parseUsageSummaryTotalCost(response.data) else {
+                continue
+            }
+            let utilization = min(max(totalCost / candidate.cap * 100, 0), 100)
+            switch candidate.kind {
+            case .fiveHour:
+                guard let window = snapshot.fiveHour else { continue }
+                snapshot.fiveHour = RateLimitWindow(
+                    utilization: utilization,
+                    resetsAt: window.resetsAt,
+                    windowDuration: window.windowDuration
+                )
+            case .weekly:
+                guard let window = snapshot.sevenDay else { continue }
+                snapshot.sevenDay = RateLimitWindow(
+                    utilization: utilization,
+                    resetsAt: window.resetsAt,
+                    windowDuration: window.windowDuration
+                )
+            }
+        }
+
+        return snapshot
+    }
+
+    private static func suspiciousSummaryWindows(in data: Data) -> [SummaryFallbackWindow] {
+        guard let root = jsonObject(data),
+              let limits = root["windowLimits"] as? [String: Any],
+              let limited = limits["limited"] as? Bool,
+              limited else {
+            return []
+        }
+
+        let definitions: [(String, SummaryFallbackWindowKind, TimeInterval)] = [
+            ("fiveHour", .fiveHour, fiveHourDuration),
+            ("weekly", .weekly, weeklyDuration)
+        ]
+        return definitions.compactMap { key, kind, duration in
+            guard let raw = limits[key] as? [String: Any],
+                  let used = number(raw["used"]),
+                  let cap = number(raw["cap"]),
+                  let resetAt = number(raw["resetAt"]),
+                  used.isFinite,
+                  cap.isFinite,
+                  resetAt.isFinite,
+                  used == 0,
+                  cap > 0,
+                  resetAt <= 0 else {
+                return nil
+            }
+            return SummaryFallbackWindow(kind: kind, cap: cap, duration: duration)
+        }
+    }
+
+    private static func parseUsageSummaryTotalCost(_ data: Data) -> Double? {
+        guard let root = jsonObject(data) else { return nil }
+        var candidates = [root]
+        for key in ["data", "summary"] {
+            if let nested = root[key] as? [String: Any] {
+                candidates.append(nested)
+            }
+        }
+        for object in candidates {
+            for key in ["totalCost", "total_cost"] {
+                guard let totalCost = number(object[key]),
+                      totalCost.isFinite,
+                      totalCost >= 0 else {
+                    continue
+                }
+                return totalCost
+            }
+        }
+        return nil
+    }
+
+    private static func iso8601String(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
     }
 
     private static func send(_ request: URLRequest) async throws -> HTTPResponse {
